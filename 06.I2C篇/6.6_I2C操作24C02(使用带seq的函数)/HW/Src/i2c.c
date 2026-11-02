@@ -1,0 +1,138 @@
+#include "i2c.h"
+#include "uart.h"
+
+I2C_HandleTypeDef i2c1;       // I2C1总控结构体
+DMA_HandleTypeDef i2c1_txdma; // I2C1的 发送DMA总控结构体
+DMA_HandleTypeDef i2c1_rxdma; // I2C1的 接收DMA总控结构体
+
+uint8_t wdata[9] = {0, 10, 11, 12, 13, 14, 15, 16, 17}; // 第一个为本次写入外设的地址编号
+uint8_t rdata[8];
+
+uint8_t bh1750_cmd1 = 0x01; // 通电指令
+uint8_t bh1750_cmd2 = 0x10; // 连续 H 分辨率模式指令
+uint8_t bh1750_buff[2];     // 保存读取数据的缓冲区
+
+// I2C初始化
+void I2C1_Init(void)
+{
+	i2c1.Instance = I2C1;                               // 使用I2C1
+	i2c1.Init.ClockSpeed = 100000;                      // 通信速率100K
+	i2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT; // 7位寻址模式
+	HAL_I2C_Init(&i2c1);                                // 初始化I2C1
+}
+
+void HAL_I2C_MspInit(I2C_HandleTypeDef *hi2c)
+{
+	GPIO_InitTypeDef GPIO_InitTypeStruct;
+	
+	if(hi2c->Instance == I2C1)
+	{
+		__HAL_RCC_GPIOB_CLK_ENABLE();
+		__HAL_RCC_I2C1_CLK_ENABLE();
+		__HAL_RCC_DMA1_CLK_ENABLE();
+		
+		GPIO_InitTypeStruct.Pin = I2C1_SCL_PIN;
+		GPIO_InitTypeStruct.Mode = GPIO_MODE_AF_OD;
+		GPIO_InitTypeStruct.Speed = GPIO_SPEED_FREQ_LOW;
+		HAL_GPIO_Init(I2C1_SCL_PORT, &GPIO_InitTypeStruct);
+		
+		GPIO_InitTypeStruct.Pin = I2C1_SDA_PIN;
+		GPIO_InitTypeStruct.Mode = GPIO_MODE_AF_OD;
+		GPIO_InitTypeStruct.Speed = GPIO_SPEED_FREQ_LOW;
+		HAL_GPIO_Init(I2C1_SDA_PORT, &GPIO_InitTypeStruct);
+		
+		// I2C1发送DMA
+		i2c1_txdma.Instance = DMA1_Channel6;
+		i2c1_txdma.Init.Direction = DMA_MEMORY_TO_PERIPH;
+		i2c1_txdma.Init.PeriphInc = DMA_PINC_DISABLE;
+		i2c1_txdma.Init.MemInc = DMA_MINC_ENABLE;
+		i2c1_txdma.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+		i2c1_txdma.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+		i2c1_txdma.Init.Mode = DMA_NORMAL;
+		i2c1_txdma.Init.Priority = DMA_PRIORITY_MEDIUM;
+		__HAL_LINKDMA(hi2c, hdmatx, i2c1_txdma);
+		HAL_DMA_Init(&i2c1_txdma);
+		
+		// I2C1发送DMA
+		i2c1_rxdma.Instance = DMA1_Channel7;
+		i2c1_rxdma.Init.Direction = DMA_PERIPH_TO_MEMORY;
+		i2c1_rxdma.Init.PeriphInc = DMA_PINC_DISABLE;
+		i2c1_rxdma.Init.MemInc = DMA_MINC_ENABLE;
+		i2c1_rxdma.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
+		i2c1_rxdma.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
+		i2c1_rxdma.Init.Mode = DMA_NORMAL;
+		i2c1_rxdma.Init.Priority = DMA_PRIORITY_MEDIUM;
+		__HAL_LINKDMA(hi2c, hdmarx, i2c1_rxdma);
+		HAL_DMA_Init(&i2c1_rxdma);
+		
+		HAL_NVIC_SetPriority(I2C1_EV_IRQn, 1, 0);
+		HAL_NVIC_EnableIRQ(I2C1_EV_IRQn);
+		
+		HAL_NVIC_SetPriority(DMA1_Channel6_IRQn, 1, 0);
+		HAL_NVIC_EnableIRQ(DMA1_Channel6_IRQn);
+		
+		HAL_NVIC_SetPriority(DMA1_Channel7_IRQn, 1, 0);
+		HAL_NVIC_EnableIRQ(DMA1_Channel7_IRQn);
+	}
+}
+
+// I2C发送完成回调函数
+void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+	if(hi2c->Instance == I2C1)
+	{
+		u1_printf("写入完成\r\n");
+		for(uint8_t i = 0; i < 8; i++)
+		{
+			wdata[i] += 8;
+		}
+	}
+}
+
+// I2C读取完成回调函数
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+	if(hi2c->Instance == I2C1)
+	{
+		u1_printf("读取完成\r\n");
+		for(uint8_t i = 1; i < 9; i++)
+		{
+			u1_printf("rdata[%d] : %d\r\n", i, rdata[i]);
+			wdata[i] += 8;
+		}
+	}
+}
+
+// I2C主机发送中断回调
+void HAL_I2C_MasterTxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+	if(hi2c->Instance == I2C1)
+	{
+		if(hi2c->XferOptions == I2C_FIRST_FRAME)
+		{
+			u1_printf("主机第一帧数据传输完成\r\n");
+			HAL_I2C_Master_Seq_Receive_DMA(&i2c1, 0xA0, rdata, 8, I2C_LAST_FRAME);
+		}
+		else
+		{
+			u1_printf("写入完成\r\n");
+		}
+	}
+}
+
+// I2C主机接收中断回调
+void  HAL_I2C_MasterRxCpltCallback(I2C_HandleTypeDef *hi2c)
+{
+	if(hi2c->Instance == I2C1)
+	{
+		if(hi2c->XferOptions == I2C_LAST_FRAME)
+		{
+			u1_printf("读取完成\r\n");
+			for(uint8_t i = 0; i < 8; i++)
+			{
+				u1_printf("rdata[%d] : %d\r\n", i, rdata[i]);
+			}
+		}
+	}
+}
+
